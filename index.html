@@ -307,6 +307,7 @@ body.light .mic-btn{background:#fff;border-color:#d0ccc6;color:#1a1816}
       <button class="mic-btn" id="mic-btn" onclick="toggleMic()" style="display:none">🎤 Hold to speak</button>
     </div>
     <textarea id="answer-input" placeholder="Type or use the mic to speak your answer…"></textarea>
+    <div id="mic-status" style="font-size:0.75rem;font-family:'DM Mono',monospace;color:#c4a95a;min-height:1.1rem;margin-top:0.25rem"></div>
     <div class="check-row">
       <div class="manual-grade">
         <span class="mg-label">Manual grade:</span>
@@ -589,7 +590,7 @@ function init() {
   // Defer render so page paints before doing heavy DOM work
   setTimeout(function(){ renderSubjects(); }, 0);
   // Init mic after a short delay (needs DOM ready)
-  setTimeout(function(){ initMic(); updateDiffUI(); }, 100);
+  setTimeout(function(){ initMic(); updateDiffUI(); }, 200);
 }
 
 // ═══════════════════════════════════════════
@@ -1412,6 +1413,8 @@ function saveSettings(){
   LS.set(K.grkey,S.grkey); LS.set(K.grmodel,S.grmodel); LS.set(K.threshold,S.threshold);
   LS.set(K.difficulty,S.difficulty);
   updateDiffUI();
+  // Re-init mic in case Groq key was just added
+  setTimeout(function(){ initMic(); }, 100);
   var hasKey=S.provider==='gemini'?!!S.gkey:!!S.grkey;
   document.getElementById('api-warn').style.display=hasKey?'none':'block';
   closeModal('settings');
@@ -1455,64 +1458,19 @@ function toggleMute() {
 // ═══════════════════════════════════════════
 // VOICE INPUT (Web Speech Recognition)
 // ═══════════════════════════════════════════
+// ═══════════════════════════════════════════
+// VOICE INPUT — Groq Whisper (works in all browsers)
+// ═══════════════════════════════════════════
 function initMic() {
-  var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) return;
-  document.getElementById('mic-btn').style.display = 'inline-flex';
-
-  function makeRecognition() {
-    var r = new SpeechRecognition();
-    r.continuous = true;
-    r.interimResults = true;
-    r.lang = 'en-US';
-    r.maxAlternatives = 1;
-
-    r.onresult = function(e) {
-      var interim = '';
-      // Process only new results from this event
-      for (var i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) {
-          // Commit finalized text permanently into _committed
-          S._committed = (S._committed || '') + e.results[i][0].transcript + ' ';
-        } else {
-          interim += e.results[i][0].transcript;
-        }
-      }
-      // Update textarea: pre-existing text + committed finals + live interim
-      var ta = document.getElementById('answer-input');
-      ta.value = (S._micBase || '') + (S._committed || '') + interim;
-      // Scroll to bottom of textarea
-      ta.scrollTop = ta.scrollHeight;
-    };
-
-    r.onend = function() {
-      if (S._micOn) {
-        // Small delay before restart to avoid race condition
-        setTimeout(function() {
-          if (S._micOn) {
-            try {
-              S.recognition = makeRecognition();
-              S.recognition.start();
-            } catch(err) {}
-          }
-        }, 150);
-      }
-    };
-
-    r.onerror = function(e) {
-      // 'no-speech' and 'aborted' are normal — don't stop recording
-      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-        stopMic();
-        alert('Microphone access denied. Please allow microphone access in your browser settings.');
-      }
-      // For all other errors (network, no-speech) just let onend handle restart
-    };
-
-    return r;
+  // MediaRecorder works in all browsers including Brave
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+  if (!window.MediaRecorder) return;
+  // Only show mic button if Groq key is set
+  if (!S.grkey) {
+    setMicStatus('Add a Groq API key in Settings to enable voice input.');
+    return;
   }
-
-  S._makeRecognition = makeRecognition;
-  S.recognition = makeRecognition();
+  document.getElementById('mic-btn').style.display = 'inline-flex';
 }
 
 function toggleMic() {
@@ -1520,31 +1478,116 @@ function toggleMic() {
 }
 
 function startMic() {
-  if (!S._makeRecognition) {
-    alert('Voice input is not supported in this browser. Please use Chrome or Edge.');
+  if (!S.grkey) {
+    alert('Add a Groq API key in Settings to use voice input.');
     return;
   }
-  S._micOn = true;
-  S._committed = '';
-  // Capture whatever is already in the textarea as the base
-  S._micBase = document.getElementById('answer-input').value;
-  if (S._micBase && !S._micBase.endsWith(' ')) S._micBase += ' ';
-  document.getElementById('mic-btn').textContent = '⏹ Stop';
-  document.getElementById('mic-btn').classList.add('recording');
-  S.recognition = S._makeRecognition();
-  try { S.recognition.start(); } catch(e) { console.warn('Mic start error:', e); }
+  // Cancel TTS if playing
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
+    S._micOn = true;
+    S._micStream = stream;
+    S._micChunks = [];
+
+    // Pick best supported format
+    var mimeType = '';
+    var candidates = ['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/mp4'];
+    for (var i = 0; i < candidates.length; i++) {
+      if (MediaRecorder.isTypeSupported(candidates[i])) { mimeType = candidates[i]; break; }
+    }
+
+    var options = mimeType ? { mimeType: mimeType } : {};
+    S._mediaRecorder = new MediaRecorder(stream, options);
+
+    S._mediaRecorder.ondataavailable = function(e) {
+      if (e.data && e.data.size > 0) S._micChunks.push(e.data);
+    };
+
+    S._mediaRecorder.onstop = function() {
+      // Stop all tracks so mic light turns off
+      stream.getTracks().forEach(function(t) { t.stop(); });
+      var blob = new Blob(S._micChunks, { type: mimeType || 'audio/webm' });
+      S._micChunks = [];
+      transcribeWithGroq(blob);
+    };
+
+    S._mediaRecorder.start(250); // collect chunks every 250ms
+
+    document.getElementById('mic-btn').textContent = '⏹ Stop';
+    document.getElementById('mic-btn').classList.add('recording');
+    setMicStatus('Recording…');
+
+    // Timer display
+    S._micSeconds = 0;
+    S._micTimer = setInterval(function() {
+      S._micSeconds++;
+      setMicStatus('Recording… ' + S._micSeconds + 's');
+    }, 1000);
+
+  }).catch(function(err) {
+    setMicStatus('Mic error: ' + err.message);
+    console.warn('getUserMedia error:', err);
+  });
 }
 
 function stopMic() {
   S._micOn = false;
-  // Commit any remaining interim as final (leave what's in textarea as-is)
-  if (S.recognition) {
-    try { S.recognition.stop(); } catch(e) {}
-  }
+  clearInterval(S._micTimer);
   document.getElementById('mic-btn').textContent = '🎤 Speak';
   document.getElementById('mic-btn').classList.remove('recording');
-  S._committed = '';
-  S._micBase = '';
+  setMicStatus('Transcribing…');
+  if (S._mediaRecorder && S._mediaRecorder.state !== 'inactive') {
+    S._mediaRecorder.stop(); // triggers onstop → transcribeWithGroq
+  }
+}
+
+async function transcribeWithGroq(audioBlob) {
+  try {
+    var formData = new FormData();
+    // Groq Whisper needs a filename with extension to detect format
+    var ext = audioBlob.type.indexOf('ogg') > -1 ? 'ogg' : audioBlob.type.indexOf('mp4') > -1 ? 'mp4' : 'webm';
+    formData.append('file', audioBlob, 'recording.' + ext);
+    formData.append('model', 'whisper-large-v3-turbo');
+    formData.append('response_format', 'text');
+    formData.append('language', 'en');
+
+    var res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + S.grkey },
+      body: formData
+    });
+
+    if (!res.ok) {
+      var err = await res.json().catch(function(){ return {}; });
+      throw new Error(err.error && err.error.message ? err.error.message : 'Groq error ' + res.status);
+    }
+
+    var transcript = (await res.text()).trim();
+    if (!transcript) { setMicStatus('Nothing heard — try again.'); return; }
+
+    // Append to textarea
+    var ta = document.getElementById('answer-input');
+    var existing = ta.value;
+    if (existing && !existing.endsWith(' ')) existing += ' ';
+    ta.value = existing + transcript;
+    ta.scrollTop = ta.scrollHeight;
+
+    var words = ta.value.trim().split(' ').filter(function(w){ return w; }).length;
+    setMicStatus('✓ ' + words + ' word' + (words === 1 ? '' : 's') + ' captured');
+
+    // Clear status after 3 seconds
+    setTimeout(function(){ setMicStatus(''); }, 3000);
+
+  } catch(e) {
+    setMicStatus('Error: ' + e.message);
+    console.warn('Whisper error:', e);
+  }
+}
+
+function setMicStatus(msg) {
+  var el = document.getElementById('mic-status');
+  if (el) el.textContent = msg;
 }
 
 // ═══════════════════════════════════════════
