@@ -1457,51 +1457,94 @@ function toggleMute() {
 // ═══════════════════════════════════════════
 function initMic() {
   var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) return; // browser doesn't support it
+  if (!SpeechRecognition) return;
   document.getElementById('mic-btn').style.display = 'inline-flex';
-  S.recognition = new SpeechRecognition();
-  S.recognition.continuous = true;
-  S.recognition.interimResults = true;
-  S.recognition.lang = 'en-US';
-  var finalTranscript = '';
-  S.recognition.onresult = function(e) {
-    var interim = '';
-    finalTranscript = '';
-    for (var i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) finalTranscript += e.results[i][0].transcript;
-      else interim += e.results[i][0].transcript;
-    }
-    var ta = document.getElementById('answer-input');
-    ta.value = (S._micBase || '') + finalTranscript + (interim ? ' ' + interim : '');
-  };
-  S.recognition.onend = function() {
-    // If still supposed to be recording, restart (handles auto-stop)
-    if (S._micOn) {
-      try { S.recognition.start(); } catch(e) {}
-    }
-  };
-  S.recognition.onerror = function(e) {
-    if (e.error !== 'no-speech') stopMic();
-  };
+
+  function makeRecognition() {
+    var r = new SpeechRecognition();
+    r.continuous = true;
+    r.interimResults = true;
+    r.lang = 'en-US';
+    r.maxAlternatives = 1;
+
+    r.onresult = function(e) {
+      var interim = '';
+      // Process only new results from this event
+      for (var i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) {
+          // Commit finalized text permanently into _committed
+          S._committed = (S._committed || '') + e.results[i][0].transcript + ' ';
+        } else {
+          interim += e.results[i][0].transcript;
+        }
+      }
+      // Update textarea: pre-existing text + committed finals + live interim
+      var ta = document.getElementById('answer-input');
+      ta.value = (S._micBase || '') + (S._committed || '') + interim;
+      // Scroll to bottom of textarea
+      ta.scrollTop = ta.scrollHeight;
+    };
+
+    r.onend = function() {
+      if (S._micOn) {
+        // Small delay before restart to avoid race condition
+        setTimeout(function() {
+          if (S._micOn) {
+            try {
+              S.recognition = makeRecognition();
+              S.recognition.start();
+            } catch(err) {}
+          }
+        }, 150);
+      }
+    };
+
+    r.onerror = function(e) {
+      // 'no-speech' and 'aborted' are normal — don't stop recording
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        stopMic();
+        alert('Microphone access denied. Please allow microphone access in your browser settings.');
+      }
+      // For all other errors (network, no-speech) just let onend handle restart
+    };
+
+    return r;
+  }
+
+  S._makeRecognition = makeRecognition;
+  S.recognition = makeRecognition();
 }
 
 function toggleMic() {
   if (S._micOn) stopMic(); else startMic();
 }
+
 function startMic() {
-  if (!S.recognition) return;
+  if (!S._makeRecognition) {
+    alert('Voice input is not supported in this browser. Please use Chrome or Edge.');
+    return;
+  }
   S._micOn = true;
+  S._committed = '';
+  // Capture whatever is already in the textarea as the base
   S._micBase = document.getElementById('answer-input').value;
   if (S._micBase && !S._micBase.endsWith(' ')) S._micBase += ' ';
-  document.getElementById('mic-btn').textContent = '⏹ Stop recording';
+  document.getElementById('mic-btn').textContent = '⏹ Stop';
   document.getElementById('mic-btn').classList.add('recording');
-  try { S.recognition.start(); } catch(e) {}
+  S.recognition = S._makeRecognition();
+  try { S.recognition.start(); } catch(e) { console.warn('Mic start error:', e); }
 }
+
 function stopMic() {
   S._micOn = false;
-  if (S.recognition) try { S.recognition.stop(); } catch(e) {}
-  document.getElementById('mic-btn').textContent = '🎤 Hold to speak';
+  // Commit any remaining interim as final (leave what's in textarea as-is)
+  if (S.recognition) {
+    try { S.recognition.stop(); } catch(e) {}
+  }
+  document.getElementById('mic-btn').textContent = '🎤 Speak';
   document.getElementById('mic-btn').classList.remove('recording');
+  S._committed = '';
+  S._micBase = '';
 }
 
 // ═══════════════════════════════════════════
