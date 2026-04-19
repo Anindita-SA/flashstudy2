@@ -756,13 +756,13 @@ function renderPanel() {
 
   document.getElementById('topic-rows').querySelectorAll('[data-star]').forEach(function(el2) {
     el2.addEventListener('click', function() {
-      var realKey = keyMap[el2.dataset.key];
-      if (realKey) setStar(realKey, parseInt(el2.dataset.star));
+      var realKey = keyMap[this.dataset.key];
+      if (realKey) setStar(realKey, parseInt(this.dataset.star));
     });
   });
   document.getElementById('topic-rows').querySelectorAll('[data-tl]').forEach(function(el2) {
     el2.addEventListener('click', function() {
-      var realKey = keyMap[el2.dataset.tl];
+      var realKey = keyMap[this.dataset.tl];
       if (realKey) cycleTL(realKey);
     });
   });
@@ -1444,8 +1444,37 @@ function speakCard() {
   var t = S.queue && S.queue[S.idx];
   if (!t) return;
   var utt = new SpeechSynthesisUtterance(t.subtopic);
-  utt.rate = 0.95; utt.pitch = 1;
+  utt.rate = 0.88;
+  utt.pitch = 1.0;
+  utt.volume = 1.0;
+  // Try to pick a natural-sounding English voice
+  var voices = window.speechSynthesis.getVoices();
+  var preferred = null;
+  // Priority order: Google voices > Microsoft voices > any en-US
+  var priorities = ['Google UK English Female','Google US English','Microsoft Aria','Microsoft Jenny','Samantha'];
+  for (var p = 0; p < priorities.length; p++) {
+    for (var v = 0; v < voices.length; v++) {
+      if (voices[v].name.indexOf(priorities[p]) > -1) { preferred = voices[v]; break; }
+    }
+    if (preferred) break;
+  }
+  // Fallback: any en-US or en-GB voice
+  if (!preferred) {
+    for (var v = 0; v < voices.length; v++) {
+      if (voices[v].lang === 'en-US' || voices[v].lang === 'en-GB') { preferred = voices[v]; break; }
+    }
+  }
+  if (preferred) utt.voice = preferred;
+  utt.lang = 'en-US';
   window.speechSynthesis.speak(utt);
+}
+
+// Voices load async — preload them
+if (window.speechSynthesis) {
+  window.speechSynthesis.getVoices();
+  window.speechSynthesis.onvoiceschanged = function() {
+    window.speechSynthesis.getVoices(); // cache them
+  };
 }
 
 function toggleMute() {
